@@ -17,7 +17,7 @@ def ema_filter(signal, alpha=0.1):
     return ema
 
 # --- Медіанний фільтр ---
-def manual_med_filter(signal, window_size):
+def median_filter(signal, window_size):
     if window_size % 2 == 0: window_size += 1
     filtered = np.zeros_like(signal)
     margin = window_size // 2
@@ -116,7 +116,7 @@ predicted_keras[centers] = y_pred
 
 # --- Інші фільтри ---
 filtered_ema = ema_filter(noisy_signal, alpha=0.1)
-filtered_median = manual_med_filter(noisy_signal, window_size)
+filtered_median = median_filter(noisy_signal, window_size)
 filtered_kalman = kalman_filter(noisy_signal, R=0.03, Q=0.05)
 
 # --- RMSE ---
