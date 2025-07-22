@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# Environment
+.env
+.venv
+venv/
+ENV/
+
+# Data/Models
+*.joblib
+*.h5
+*.keras
+*.pkl
+*.ckpt
+*.pb
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Images/plots
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.gif
