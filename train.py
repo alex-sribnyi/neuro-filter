@@ -7,25 +7,25 @@ from sklearn.linear_model import SGDRegressor
 from sklearn.preprocessing import StandardScaler
 
 # --- Параметри ---
-window_size = 11
+window_size = 21
 signal_length = 3000
 noise_std = 0.17
 
 # --- Генерація сигналу ---
-def add_impulse_noise(signal, impulse_ratio=0.01, impulse_strength=3.0):
-    signal = signal.copy()
-    n_impulses = int(len(signal) * impulse_ratio)
-    indices = np.random.choice(len(signal), n_impulses, replace=False)
+# def add_impulse_noise(signal, impulse_ratio=0.01, impulse_strength=3.0):
+#     signal = signal.copy()
+#     n_impulses = int(len(signal) * impulse_ratio)
+#     indices = np.random.choice(len(signal), n_impulses, replace=False)
     
-    # Генеруємо сплески: випадково -1 або +1
-    impulses = np.random.choice([-1, 1], size=n_impulses) * impulse_strength
-    signal[indices] += impulses
-    return signal
+#     # Генеруємо сплески: випадково -1 або +1
+#     impulses = np.random.choice([-1, 1], size=n_impulses) * impulse_strength
+#     signal[indices] += impulses
+#     return signal
 
 x = np.linspace(0, 8 * np.pi, signal_length)
 clean_signal = np.sin(x)
 noisy_signal = clean_signal + np.random.normal(0, noise_std, size=signal_length)
-noisy_signal = add_impulse_noise(noisy_signal)
+# noisy_signal = add_impulse_noise(noisy_signal)
 
 # --- Ініціалізація моделі ---
 model = SGDRegressor(

@@ -1,69 +1,64 @@
-# keras_train_optimized.py
+# keras_train_cnn.py (навчання лише на синусі з імпульсним шумом)
 
 import numpy as np
-from keras.models import Sequential
-from keras.layers import Dense, Dropout, InputLayer
-from keras.regularizers import l2
-from keras.losses import Huber
-from keras.optimizers import Nadam
+from tensorflow import keras
 from sklearn.preprocessing import StandardScaler
 import joblib
 
 # --- Параметри ---
-signal_length = 5000
 window_size = 25
+signal_length = 3000
 noise_std = 0.3
 
-# --- Генерація сигналу ---
-x = np.linspace(0, 10 * np.pi, signal_length)
-clean_signal = np.sin(x)
-noisy_signal = clean_signal + np.random.normal(0, noise_std, size=signal_length)
+# --- Генерація синусоїдального сигналу ---
+def generate_signal(length):
+    x = np.linspace(0, 12, length)
+    return np.sin(x)
 
-# --- Побудова ознак ---
-X, y = [], []
-for i in range(signal_length - window_size):
-    window = noisy_signal[i:i + window_size]
-    center = i + window_size // 2
+X = []
+y = []
 
-    derivative = np.diff(window).mean()
-    mean_val = np.mean(window)
-    std_val = np.std(window)
-    range_val = np.ptp(window)
-    position = x[center] / x.max()
-    autoreg = 0  # при тренуванні не використовуємо autoreg
+for _ in range(600):
+    signal = generate_signal(window_size + 1)
+    noise = np.random.normal(0, noise_std, size=signal.shape)
 
-    features = np.concatenate([window, [derivative, mean_val, std_val, range_val, autoreg, position]])
-    X.append(features)
-    y.append(clean_signal[center])
+    noisy = signal + noise
+
+    for i in range(len(noisy) - window_size):
+        window = noisy[i:i + window_size]
+        target = signal[i + window_size // 2]  # середина як таргет
+        X.append(window)
+        y.append(target)
 
 X = np.array(X)
-y = np.array(y)
+y = np.array(y).reshape(-1, 1)
 
 # --- Масштабування ---
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 joblib.dump(scaler, "keras_scaler.joblib")
 
-# --- Масштабування цілі ---
-target_scaler = StandardScaler()
-y_scaled = target_scaler.fit_transform(y.reshape(-1, 1)).ravel()
-joblib.dump(target_scaler, "keras_target_scaler.joblib")
+scaler_y = StandardScaler()
+y_scaled = scaler_y.fit_transform(y)
+joblib.dump(scaler_y, "keras_target_scaler.joblib")
 
-# --- Побудова моделі ---
-model = Sequential()
-model.add(InputLayer(input_shape=(X.shape[1],)))
-model.add(Dense(128, activation='relu', kernel_regularizer=l2(1e-5)))
-model.add(Dropout(0.05))
-model.add(Dense(64, activation='relu', kernel_regularizer=l2(1e-5)))
-model.add(Dropout(0.05))
-model.add(Dense(32, activation='relu'))
-model.add(Dense(1))
+# --- CNN модель ---
+model = keras.Sequential([
+    keras.layers.Input(shape=(window_size, 1)),
+    keras.layers.Conv1D(32, kernel_size=3, activation='relu'),
+    keras.layers.Conv1D(64, kernel_size=3, activation='relu'),
+    keras.layers.Flatten(),
+    keras.layers.Dense(64, activation='relu'),
+    keras.layers.Dense(1)
+])
 
-model.compile(optimizer=Nadam(), loss=Huber(delta=1.0))
+model.compile(optimizer='adam', loss='mse')
+model.summary()
 
 # --- Навчання ---
-model.fit(X_scaled, y_scaled, epochs=100, batch_size=32, verbose=1)
+X_cnn = X_scaled.reshape(-1, window_size, 1)
+model.fit(X_cnn, y_scaled, epochs=100, batch_size=32, verbose=1)
 
 # --- Збереження ---
 model.save("keras_model.keras")
-print("✅ Оптимізована модель збережена як keras_model.keras")
+print("✅ CNN модель та scaler'и збережено!")

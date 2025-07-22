@@ -8,7 +8,7 @@ from filterpy.kalman import UnscentedKalmanFilter as UKF
 from filterpy.kalman import MerweScaledSigmaPoints
 
 # --- Параметри ---
-window_size = 11
+window_size = 21
 signal_length = 3000
 noise_std = 0.17
 
@@ -66,20 +66,21 @@ def kalman_filter(signal, dt=1.0, R=0.05, Q=1e-2):
     return np.array(filtered)
 
 # --- Генерація нового сигналу (наприклад, sin(x²)) ---
-def add_impulse_noise(signal, impulse_ratio=0.01, impulse_strength=3.0):
-    signal = signal.copy()
-    n_impulses = int(len(signal) * impulse_ratio)
-    indices = np.random.choice(len(signal), n_impulses, replace=False)
+# def add_impulse_noise(signal, impulse_ratio=0.01, impulse_strength=3.0):
+#     signal = signal.copy()
+#     n_impulses = int(len(signal) * impulse_ratio)
+#     indices = np.random.choice(len(signal), n_impulses, replace=False)
     
-    # Генеруємо сплески: випадково -1 або +1
-    impulses = np.random.choice([-1, 1], size=n_impulses) * impulse_strength
-    signal[indices] += impulses
-    return signal
+#     # Генеруємо сплески: випадково -1 або +1
+#     impulses = np.random.choice([-1, 1], size=n_impulses) * impulse_strength
+#     signal[indices] += impulses
+#     return signal
 
 x = np.linspace(0, 12, signal_length)
-clean_signal = np.sin(x ** 2)
+# clean_signal = np.sin(x) + 0.5 * np.sin(3 * x)
+clean_signal = np.zeros(signal_length)  # Зворотний лінійний спад
 noisy_signal = clean_signal + np.random.normal(0, noise_std, size=signal_length)
-noisy_signal = add_impulse_noise(noisy_signal)
+# noisy_signal = add_impulse_noise(noisy_signal)
 
 # --- Обробка через модель ---
 predicted_sgd = np.full(signal_length, np.nan)
@@ -115,7 +116,7 @@ for i in range(0, signal_length - window_size):
     predicted_sgd[center] = y_pred
 
 # --- EMA фільтр ---
-filtered_avg = ema_filter(noisy_signal, 0.3)
+filtered_ema = ema_filter(noisy_signal, 0.05)
 
 # --- Медіанний фільтр ---
 filtered_median = median_filter(noisy_signal, window_size)
@@ -130,7 +131,7 @@ def compute_rmse(pred, target):
 
 rmse_noise = compute_rmse(noisy_signal, clean_signal)
 rmse_sgd = compute_rmse(predicted_sgd, clean_signal)
-rmse_avg = compute_rmse(filtered_avg, clean_signal)
+rmse_avg = compute_rmse(filtered_ema, clean_signal)
 rmse_median = compute_rmse(filtered_median, clean_signal)
 rmse_kalman = compute_rmse(filtered_kalman, clean_signal)
 
@@ -165,7 +166,7 @@ plt.subplot(5, 1, 3)
 plt.title(f"EMA — RMSE = {rmse_avg:.4f}")
 plt.plot(clean_signal, label='Clean signal', linewidth=1)
 plt.plot(noisy_signal, label='Noisy signal', alpha=0.3)
-plt.plot(filtered_avg, label='Averaged signal', linewidth=2)
+plt.plot(filtered_ema, label='Averaged signal', linewidth=2)
 plt.legend()
 plt.grid(True)
 

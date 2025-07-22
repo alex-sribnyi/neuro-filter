@@ -57,11 +57,11 @@ def kalman_filter(signal, dt=1.0, R=0.05, Q=1e-2):
     return np.array(filtered)
 
 # --- Імпульсний шум ---
-def add_impulse_noise(signal, ratio=0.01, strength=3.0):
-    signal = signal.copy()
-    idx = np.random.choice(len(signal), int(len(signal) * ratio), replace=False)
-    signal[idx] += np.random.choice([-1, 1], size=len(idx)) * strength
-    return signal
+# def add_impulse_noise(signal, ratio=0.01, strength=3.0):
+#     signal = signal.copy()
+#     idx = np.random.choice(len(signal), int(len(signal) * ratio), replace=False)
+#     signal[idx] += np.random.choice([-1, 1], size=len(idx)) * strength
+#     return signal
 
 # --- RMSE ---
 def compute_rmse(pred, target):
@@ -71,44 +71,36 @@ def compute_rmse(pred, target):
 # --- Параметри ---
 window_size = 25
 signal_length = 3000
-noise_std = 0.3
+noise_std = 0.03
 
 # --- Завантаження моделі та scaler ---
 model = load_model("keras_model.keras")
 scaler = joblib.load("keras_scaler.joblib")
 target_scaler = joblib.load("keras_target_scaler.joblib")
-print("\u2705 Модель і scaler завантажено!")
+print("Модель завантажено!")
 
 # --- Генерація тестового сигналу ---
 x = np.linspace(0, 12, signal_length)
-clean_signal = np.sin(x ** 2)
+clean_signal = np.sin(x) + 0.5 * np.sin(3 * x)
 noisy_signal = clean_signal + np.random.normal(0, noise_std, size=signal_length)
-noisy_signal = add_impulse_noise(noisy_signal, ratio=0.01, strength=3.0)
 
-# --- Побудова ознак для всіх вікон ---
+# noisy_signal = add_impulse_noise(noisy_signal, ratio=0.01, strength=3.0)
+
+# --- Побудова ознак для CNN (лише window) ---
 X_test = []
 centers = []
 for i in range(0, signal_length - window_size):
     window = noisy_signal[i:i + window_size]
-    center = i + window_size // 2
-
-    derivative = np.diff(window).mean()
-    mean_val = np.mean(window)
-    std_val = np.std(window)
-    range_val = np.ptp(window)
-    position = x[center] / x.max()
-    autoreg = 0
-
-    features = np.concatenate([window, [derivative, mean_val, std_val, range_val, autoreg, position]])
-    features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+    features = np.nan_to_num(window, nan=0.0, posinf=0.0, neginf=0.0)
     X_test.append(features)
-    centers.append(center)
+    centers.append(i + window_size // 2)
 
 X_test = np.array(X_test)
 X_test_scaled = scaler.transform(X_test)
+X_test_cnn = X_test_scaled.reshape(-1, window_size, 1)
 
-# --- Векторизоване передбачення ---
-y_pred_scaled = model.predict(X_test_scaled, verbose=0).ravel()
+# --- Передбачення ---
+y_pred_scaled = model.predict(X_test_cnn, verbose=0).ravel()
 y_pred = target_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).ravel()
 
 predicted_keras = np.full(signal_length, np.nan)
