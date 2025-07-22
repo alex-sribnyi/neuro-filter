@@ -4,7 +4,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import joblib
 from keras.models import load_model
-from scipy.ndimage import median_filter
 from sklearn.metrics import mean_squared_error
 from filterpy.kalman import UnscentedKalmanFilter as UKF
 from filterpy.kalman import MerweScaledSigmaPoints
@@ -22,10 +21,14 @@ def manual_med_filter(signal, window_size):
     if window_size % 2 == 0: window_size += 1
     filtered = np.zeros_like(signal)
     margin = window_size // 2
-    for i in range(margin + 1, len(signal) - margin):
-        window = np.array(signal[i - margin - 1 : i + margin])
-        #### +-1 ??
+    for i in range(margin, len(signal) - margin):
+        window = np.array(signal[i - margin : i + margin + 1])
         filtered[i] = np.sort(window)[margin]
+        if i == margin:
+            filtered[:margin] = filtered[margin]
+        elif i == len(signal) - margin - 1:
+            filtered[-margin:] = filtered[-margin - 1]
+    return filtered
 
 # --- Калманівський фільтр ---
 def fx(x, dt):
@@ -113,7 +116,7 @@ predicted_keras[centers] = y_pred
 
 # --- Інші фільтри ---
 filtered_ema = ema_filter(noisy_signal, alpha=0.1)
-filtered_median = median_filter(noisy_signal, size=window_size)
+filtered_median = manual_med_filter(noisy_signal, window_size)
 filtered_kalman = kalman_filter(noisy_signal, R=0.03, Q=0.05)
 
 # --- RMSE ---
