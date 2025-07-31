@@ -10,7 +10,7 @@ from filterpy.kalman import MerweScaledSigmaPoints
 # --- Параметри ---
 window_size = 21
 signal_length = 3000
-noise_std = 0.17
+noise_std = 0.02
 
 # --- Завантаження моделі та scaler ---
 model = joblib.load('sgd_model.joblib')
@@ -77,8 +77,8 @@ def kalman_filter(signal, dt=1.0, R=0.05, Q=1e-2):
 #     return signal
 
 x = np.linspace(0, 12, signal_length)
-# clean_signal = np.sin(x) + 0.5 * np.sin(3 * x)
-clean_signal = np.zeros(signal_length)  # Зворотний лінійний спад
+clean_signal = np.sin(x) + 0.5 * np.sin(3 * x)
+# clean_signal = np.zeros(signal_length)  # Зворотний лінійний спад
 noisy_signal = clean_signal + np.random.normal(0, noise_std, size=signal_length)
 # noisy_signal = add_impulse_noise(noisy_signal)
 
