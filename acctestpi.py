@@ -9,7 +9,7 @@ import numpy as np
 I2C_ADDR = 0x53
 BUS = smbus.SMBus(1)  # I2C-1 на Raspberry Pi
 BAUD = 115200
-SERIAL_PORT = "/dev/ttyUSB0"  # адаптер COM-порту
+SERIAL_PORT = "/dev/rfcomm0"  # адаптер COM-порту
 
 WINDOW_SIZE = 5
 roll_buffer = []
