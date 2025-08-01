@@ -1,15 +1,15 @@
 import smbus
+import socket
 import time
 import math
-import serial
 import joblib
 import numpy as np
 
 # === Константи ===
 I2C_ADDR = 0x53
 BUS = smbus.SMBus(1)  # I2C-1 на Raspberry Pi
-BAUD = 115200
-SERIAL_PORT = "/dev/rfcomm0"  # адаптер COM-порту
+HOST = '192.168.0.2'
+PORT = 5000
 
 WINDOW_SIZE = 5
 roll_buffer = []
@@ -35,9 +35,11 @@ def read_adxl345():
 roll_model = joblib.load("roll_model.joblib")
 pitch_model = joblib.load("pitch_model.joblib")
 
-# === Ініціалізація серійного порту ===
-ser = serial.Serial(SERIAL_PORT, BAUD)
-time.sleep(2)
+# === Ініціалізація ===
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.bind((HOST, PORT))
+sock.listen(1)
+conn, addr = sock.accept()
 
 # === Основний цикл ===
 setup_adxl345()
@@ -60,12 +62,13 @@ while True:
             pitch_filt = pitch_model.predict(X_pitch)[0]
 
             output = f"{roll_filt:.2f},{pitch_filt:.2f}\n"
-            ser.write(output.encode())
+            conn.sendall(output.encode())
+            time.sleep(0.01)
             print("📤", output.strip())
 
         time.sleep(0.01)
 
     except KeyboardInterrupt:
         print("\n❌ Завершення...")
-        ser.close()
+        conn.close()
         break
