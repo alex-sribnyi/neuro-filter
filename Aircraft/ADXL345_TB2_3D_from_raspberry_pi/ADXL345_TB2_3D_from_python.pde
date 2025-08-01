@@ -118,5 +118,5 @@ void exit() {
     e.printStackTrace();
   }
   
-  exit(0)
+  exit();
 }
