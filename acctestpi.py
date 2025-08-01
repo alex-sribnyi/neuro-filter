@@ -51,6 +51,11 @@ while True:
         roll = math.atan2(yg, zg) * 180 / math.pi
         pitch = math.atan2(-xg, math.sqrt(yg**2 + zg**2)) * 180 / math.pi
 
+        if roll > 80: roll = 80
+        if roll < -80: roll = -80   
+        if pitch > 80: pitch = 80
+        if pitch < -80: pitch = -80
+
         roll_buffer.append(roll)
         pitch_buffer.append(pitch)
 
