@@ -28,7 +28,7 @@ String timestamp = nf(year(), 4) + "-" +
                    nf(minute(), 2) + "-" + 
                    nf(second(), 2);
 
-String filename = "../Records/log_" + timestamp + ".txt";
+String filename = "../../Records/log_" + timestamp + ".txt";
 
 PrintWriter output;
 
@@ -52,7 +52,7 @@ void draw() {
   translate(width/2, height/2, 0);
   background(33);
   textSize(18);
-  text("<Space>  - вивести графіки", -450, 240);
+  text("<Esc>  - Завершити виконання та вивести графіки", -450, 240);
   text("<+>, <-> - Zoom", -450, 260);
 
   if (keyCode == 139) {
@@ -62,10 +62,6 @@ void draw() {
   if (keyCode == 140) {
     scale = 0.9;
     keyCode = 0;
-  }
-
-  if (keyCode == 32) {
-    // Charts
   }
 
   readSocket();
@@ -93,10 +89,34 @@ void readSocket() {
 }
 
 void draw_UAV() {
-  rotateX(radians(-pitchFiltered));
+  rotateX(radians(-rollFiltered));
   rotateZ(radians(pitchFiltered));
   rotateY(camera_yaw);
   TB2.scale(scale);
   shape(TB2);
   scale = 1.0;
+}
+
+void exit() {
+  try {
+    output.close();
+    // 🔁 Назва скрипта (той самий каталог, що і скетч)
+    String scriptName = "../../filters_compare.py";
+
+    ProcessBuilder pb = new ProcessBuilder("python", scriptName, filename);
+    pb.directory(new File(sketchPath())); // Встановлюємо робочу директорію
+
+    // 🔁 Перенаправлення виводу в системну консоль
+    pb.inheritIO();
+
+    Process process = pb.start();
+
+    int exitCode = process.waitFor();
+    println("✅ Скрипт завершено. Код:", exitCode);
+
+  } catch (Exception e) {
+    e.printStackTrace();
+  }
+  
+  exit(0)
 }

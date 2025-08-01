@@ -67,7 +67,6 @@ while True:
             conn.sendall(output.encode())
             time.sleep(0.01)
             print("📤", output.strip())
-        time.sleep(0.01)
 
     except KeyboardInterrupt:
         print("\n❌ Завершення...")

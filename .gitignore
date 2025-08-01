@@ -27,6 +27,7 @@ ENV/
 *.pkl
 *.ckpt
 *.pb
+Records/
 
 # OS
 .DS_Store
