@@ -8,9 +8,9 @@ from filterpy.kalman import UnscentedKalmanFilter as UKF
 from filterpy.kalman import MerweScaledSigmaPoints
 
 # --- Параметри ---
-window_size = 21
+window_size = 7
 signal_length = 3000
-noise_std = 0.02
+noise_std = 0.01
 
 # --- Завантаження моделі та scaler ---
 model = joblib.load('sgd_model.joblib')
@@ -91,18 +91,9 @@ for i in range(0, signal_length - window_size):
     center = i + window_size // 2
 
     derivative = np.diff(window).mean()
-    mean_val = np.mean(window)
-    std_val = np.std(window)
-    range_val = np.ptp(window)
-    position = x[center] / x.max()
+    autoreg = last_pred
 
-    if not np.isfinite(last_pred):
-        last_pred = 0.0
-
-    features = np.concatenate([
-        window,
-        [derivative, mean_val, std_val, range_val, last_pred, position]
-    ])
+    features = np.append(window, [derivative, autoreg])
     features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
 
     try:

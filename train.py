@@ -1,75 +1,82 @@
-import serial
-import time
 import numpy as np
-from sklearn.linear_model import SGDRegressor
-import joblib
 import matplotlib.pyplot as plt
+from sklearn.linear_model import SGDRegressor
+from sklearn.preprocessing import StandardScaler
+import joblib
 
-PORT = 'COM10'
-BAUD = 115200
-SAMPLES = 1000
-K = 0.05  # EMA коефіцієнт
+# --- Параметри ---
+signal_length = 3000
+window_size = 7
+noise_std = 0.2
+batch_size = 16
 
-ser = serial.Serial(PORT, BAUD, timeout=1)
-time.sleep(2)
+# --- Генерація сигналу ---
+x = np.linspace(0, 8 * np.pi, signal_length)
+clean_signal = np.sin(x)
+noisy_signal = clean_signal + np.random.normal(0, noise_std, size=signal_length)
 
-roll_raw = []
-pitch_raw = []
-roll_ema = []
-pitch_ema = []
+# --- Ініціалізація моделі та scaler'а ---
+model = SGDRegressor(penalty='l2', alpha=1e-4, learning_rate='constant', eta0=1e-2,
+                     max_iter=1, warm_start=True)
+scaler = StandardScaler()
 
-print("Збір даних...")
+# --- Початкове навчання ---
+X_init, y_init = [], []
+for i in range(100):
+    window = noisy_signal[i:i + window_size]
+    derivative = np.diff(window).mean()
+    autoreg = 0
+    features = np.append(window, [derivative, autoreg])
+    X_init.append(features)
+    y_init.append(clean_signal[i + window_size // 2])
 
-rollF = 0
-pitchF = 0
+X_init = scaler.fit_transform(X_init)
+model.partial_fit(X_init, y_init)
+last_pred = 0
 
-while len(roll_raw) < SAMPLES:
-    line = ser.readline().decode().strip()
-    if ',' in line:
-        try:
-            roll, pitch = map(float, line.split(',')[:2])
-            rollF = K * roll + (1 - K) * rollF
-            pitchF = K * pitch + (1 - K) * pitchF
+# --- Основний цикл онлайн-навчання ---
+predicted = [None] * signal_length
+buffer_X, buffer_y = [], []
 
-            roll_raw.append([roll])
-            roll_ema.append(rollF)
+for i in range(100, signal_length - window_size):
+    window = noisy_signal[i:i + window_size]
+    derivative = np.diff(window).mean()
+    autoreg = last_pred
 
-            pitch_raw.append([pitch])
-            pitch_ema.append(pitchF)
+    features = np.append(window, [derivative, autoreg])
+    features = scaler.transform([features])[0]
 
-            print(f"#{len(roll_raw)}: Roll={roll:.2f} → {rollF:.2f}")
-        except:
-            continue
+    y_true = clean_signal[i + window_size // 2]
+    y_pred = model.predict([features])[0]
+    last_pred = y_pred
+    predicted[i + window_size // 2] = y_pred
 
-ser.close()
+    buffer_X.append(features)
+    buffer_y.append(y_true)
 
-# Навчання
-roll_model = SGDRegressor()
-pitch_model = SGDRegressor()
+    # Адаптація швидкості навчання
+    if i == 500:
+        model.eta0 = 5e-3
+    elif i == 1000:
+        model.eta0 = 1e-3
 
-roll_model.fit(roll_raw, roll_ema)
-pitch_model.fit(pitch_raw, pitch_ema)
+    # Часткове навчання на батчах
+    if len(buffer_X) >= batch_size:
+        model.partial_fit(np.array(buffer_X), np.array(buffer_y))
+        buffer_X, buffer_y = [], []
 
-joblib.dump(roll_model, "roll_model.joblib")
-joblib.dump(pitch_model, "pitch_model.joblib")
+# --- Збереження моделі ---
+joblib.dump(model, "sgd_model.joblib")
+joblib.dump(scaler, "scaler.joblib")
+print("✅ Модель і scaler збережено!")
 
-print("Моделі збережено.")
-
-# Візуалізація
-plt.figure(figsize=(10, 6))
-plt.subplot(2, 1, 1)
-plt.title("Roll")
-plt.plot([r[0] for r in roll_raw], label="Raw")
-plt.plot(roll_ema, label="EMA", linestyle='--')
-plt.plot(roll_model.predict(roll_raw), label="Predicted", linestyle=':')
+# --- Візуалізація результату навчання ---
+plt.figure(figsize=(14, 5))
+plt.plot(noisy_signal, label='Noisy', alpha=0.4)
+plt.plot(clean_signal, label='Clean', linewidth=1)
+plt.plot(predicted, label='Filtered (SGD)', linewidth=2)
+plt.title('Онлайн-фільтрація сигналу (SGDRegressor)')
 plt.legend()
-
-plt.subplot(2, 1, 2)
-plt.title("Pitch")
-plt.plot([p[0] for p in pitch_raw], label="Raw")
-plt.plot(pitch_ema, label="EMA", linestyle='--')
-plt.plot(pitch_model.predict(pitch_raw), label="Predicted", linestyle=':')
-plt.legend()
-
+plt.grid(True)
 plt.tight_layout()
 plt.show()
