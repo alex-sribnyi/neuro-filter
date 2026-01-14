@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # acc_train_v2.py
 # Навчання ML-фільтра (SGD) на Raspberry Pi з ADXL345 у форматі "статичні сегменти + пауза на зміну пози".
-# Мета: зберегти постановку noise-only, але з різними статичними кутами (DC-рівнями), щоб уникнути "сплющення" амплітуди.
+# Ключове виправлення: формування ковзних вікон НЕ ПОВИННО перетинати межі segment_id.
 #
 # Вихід:
 #   models/roll_model_v2.joblib
 #   models/pitch_model_v2.joblib
-#   records/noise_train_YYYY-MM-DD_HH-MM-SS.jsonl (лог навчання)
+#   records/noise_train_YYYY-MM-DD_HH-MM-SS.jsonl
 
 import os
 import time
@@ -27,13 +27,12 @@ from sklearn.linear_model import SGDRegressor
 I2C_ADDR = 0x53
 I2C_BUS_ID = 1
 
-# Сегменти (пози)
-SEGMENTS = 10                 # скільки різних положень (кутів)
-HOLD_SECONDS = 12.0           # тривалість збору в кожній позі (сек)
-SLEEP_SEC = 0.01              # цільова пауза між відліками (якщо 0 — максимум швидкості)
+SEGMENTS = 10
+HOLD_SECONDS = 12.0
+SLEEP_SEC = 0.01
 
-WINDOW_SIZE = 5               # як у вас
-WARMUP_SECONDS = 0.7          # пропуск перших відліків після натискання Enter (щоб затухли мікроколивання)
+WINDOW_SIZE = 5
+WARMUP_SECONDS = 0.7
 
 MODELS_DIR = "models"
 RECORDS_DIR = "records"
@@ -41,7 +40,6 @@ RECORDS_DIR = "records"
 ROLL_MODEL_PATH = os.path.join(MODELS_DIR, "roll_model_v2.joblib")
 PITCH_MODEL_PATH = os.path.join(MODELS_DIR, "pitch_model_v2.joblib")
 
-# SGD як у старому експерименті
 SGD_MAX_ITER = 1000
 SGD_TOL = 1e-3
 
@@ -78,21 +76,13 @@ def read_adxl345(bus: smbus.SMBus):
 
 def accel_to_roll_pitch(ax, ay, az):
     roll = math.atan2(ay, az) * 180.0 / math.pi
-    pitch = math.atan2(-ax, math.sqrt(ay * ay + az * az)) * 180.0 / math.pi
+    pitch = math.atan2(-ax, math.sqrt(ay**2 + az**2)) * 180.0 / math.pi
     return roll, pitch
 
 
 # =========================
 # Dataset
 # =========================
-def build_window_dataset(series: np.ndarray, window: int):
-    # X_t = [y_{t-window},...,y_{t-1}], y_t = y_t
-    X, y = [], []
-    for i in range(window, len(series)):
-        X.append(series[i - window:i])
-        y.append(series[i])
-    return np.asarray(X, dtype=np.float32), np.asarray(y, dtype=np.float32)
-
 def estimate_fs(t_list):
     if len(t_list) < 3:
         return float("nan"), float("nan")
@@ -100,6 +90,30 @@ def estimate_fs(t_list):
     dt_med = float(np.median(dts))
     fs = 1.0 / dt_med if dt_med > 0 else float("nan")
     return fs, dt_med
+
+def build_window_dataset_segmented(series: np.ndarray, seg_ids: np.ndarray, window: int):
+    """
+    Формує X/y так, щоб жодне ковзне вікно НЕ перетинало межі segment_id.
+    """
+    X, y = [], []
+    n = len(series)
+    if n != len(seg_ids):
+        raise ValueError("series і seg_ids повинні мати однакову довжину")
+
+    # проходимо послідовно; для кожної точки i перевіряємо, що seg_ids на [i-window, i] однаковий
+    for i in range(window, n):
+        seg = seg_ids[i]
+        if np.all(seg_ids[i - window:i + 1] == seg):
+            X.append(series[i - window:i])
+            y.append(series[i])
+
+    X = np.asarray(X, dtype=np.float32)
+    y = np.asarray(y, dtype=np.float32)
+
+    if len(X) == 0:
+        raise RuntimeError("Після сегментації не залишилось даних для навчання. Збільшіть HOLD_SECONDS або зменшіть WINDOW_SIZE.")
+
+    return X, y
 
 
 def main():
@@ -114,6 +128,7 @@ def main():
     t_all = []
     roll_all = []
     pitch_all = []
+    seg_all = []  # <-- ДОДАНО: зберігаємо segment_id для кожного відліку
 
     print(f"TRAIN v2 (segmented): segments={SEGMENTS}, hold={HOLD_SECONDS}s, warmup={WARMUP_SECONDS}s, sleep={SLEEP_SEC}s")
     print("Workflow: set position -> press Enter -> wait -> capture -> pause -> change position -> press Enter ...")
@@ -150,6 +165,7 @@ def main():
                 t_all.append(t)
                 roll_all.append(roll)
                 pitch_all.append(pitch)
+                seg_all.append(seg)  # <-- ДОДАНО
 
                 if SLEEP_SEC > 0:
                     time.sleep(SLEEP_SEC)
@@ -164,9 +180,11 @@ def main():
 
     roll_arr = np.asarray(roll_all, dtype=np.float32)
     pitch_arr = np.asarray(pitch_all, dtype=np.float32)
+    seg_arr = np.asarray(seg_all, dtype=np.int32)
 
-    X_roll, y_roll = build_window_dataset(roll_arr, WINDOW_SIZE)
-    X_pitch, y_pitch = build_window_dataset(pitch_arr, WINDOW_SIZE)
+    # ВИПРАВЛЕННЯ: формуємо датасет без перетину меж сегментів
+    X_roll, y_roll = build_window_dataset_segmented(roll_arr, seg_arr, WINDOW_SIZE)
+    X_pitch, y_pitch = build_window_dataset_segmented(pitch_arr, seg_arr, WINDOW_SIZE)
 
     print("\nTraining models...")
     roll_model = SGDRegressor(max_iter=SGD_MAX_ITER, tol=SGD_TOL)
@@ -179,7 +197,8 @@ def main():
     joblib.dump(pitch_model, PITCH_MODEL_PATH)
 
     print("Done.")
-    print(f"Samples total: {n}, fs~{fs:.2f} Hz (median dt={dt_med:.6f}s)")
+    print(f"Samples total: {n}, usable for train: roll={len(X_roll)}, pitch={len(X_pitch)}")
+    print(f"fs~{fs:.2f} Hz (median dt={dt_med:.6f}s)")
     print(f"Models: {ROLL_MODEL_PATH}, {PITCH_MODEL_PATH}")
     print(f"Train log: {log_path}")
 
