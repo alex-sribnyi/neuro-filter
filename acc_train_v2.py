@@ -1,50 +1,68 @@
 #!/usr/bin/env python3
-# train_models_rpi.py
-# Навчання SGD-моделей (roll/pitch) прямо на Raspberry Pi з ADXL345 (noise-only режим).
-# Налаштування задаються змінними нижче (без argparse). Мінімум print; raw лог у CSV; моделі через joblib.
+# acc_train_v2.py
+# Навчання ML-фільтра (SGD) на Raspberry Pi з ADXL345 у форматі "статичні сегменти + пауза на зміну пози".
+# Мета: зберегти постановку noise-only, але з різними статичними кутами (DC-рівнями), щоб уникнути "сплющення" амплітуди.
+#
+# Вихід:
+#   models/roll_model_v2.joblib
+#   models/pitch_model_v2.joblib
+#   records/noise_train_YYYY-MM-DD_HH-MM-SS.jsonl (лог навчання)
 
 import os
 import time
 import math
-import csv
+import json
+from datetime import datetime
 
 import numpy as np
 import smbus
 import joblib
 
 from sklearn.linear_model import SGDRegressor
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
 
 
 # =========================
-# НАЛАШТУВАННЯ (редагуйте тут)
+# НАЛАШТУВАННЯ
 # =========================
 I2C_ADDR = 0x53
 I2C_BUS_ID = 1
 
-TRAIN_SAMPLES = 1000       # кількість відліків для збору (noise-only)
-WINDOW_SIZE = 5            # розмір ковзного вікна
-SLEEP_SEC = 0.01           # пауза між відліками; 0 = без паузи
+# Сегменти (пози)
+SEGMENTS = 10                 # скільки різних положень (кутів)
+HOLD_SECONDS = 12.0           # тривалість збору в кожній позі (сек)
+SLEEP_SEC = 0.01              # цільова пауза між відліками (якщо 0 — максимум швидкості)
 
-OUT_DIR = "models"
-FILE_PREFIX = "adxl345_noise"
+WINDOW_SIZE = 5               # як у вас
+WARMUP_SECONDS = 0.7          # пропуск перших відліків після натискання Enter (щоб затухли мікроколивання)
 
-# SGD налаштування (можете змінювати пізніше, але зафіксуйте для статті)
+MODELS_DIR = "models"
+RECORDS_DIR = "records"
+
+ROLL_MODEL_PATH = os.path.join(MODELS_DIR, "roll_model_v2.joblib")
+PITCH_MODEL_PATH = os.path.join(MODELS_DIR, "pitch_model_v2.joblib")
+
+# SGD як у старому експерименті
 SGD_MAX_ITER = 1000
 SGD_TOL = 1e-3
-SGD_ALPHA = 1e-4           # L2 регуляризація
-SGD_RANDOM_STATE = 42
 
 
 # =========================
-# ADXL345 (I2C)
+# Utilities
+# =========================
+def ts_name(prefix: str, ext: str) -> str:
+    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    return f"{prefix}_{stamp}.{ext}"
+
+def jsonl_write(fp, obj):
+    fp.write(json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
+# =========================
+# ADXL345
 # =========================
 def setup_adxl345(bus: smbus.SMBus):
-    # POWER_CTL (0x2D): measurement mode
-    bus.write_byte_data(I2C_ADDR, 0x2D, 0x08)
-    # DATA_FORMAT (0x31): full resolution, ±2g
-    bus.write_byte_data(I2C_ADDR, 0x31, 0x08)
+    bus.write_byte_data(I2C_ADDR, 0x2D, 0x08)  # POWER_CTL measurement
+    bus.write_byte_data(I2C_ADDR, 0x31, 0x08)  # DATA_FORMAT full res ±2g
 
 def read_adxl345(bus: smbus.SMBus):
     data = bus.read_i2c_block_data(I2C_ADDR, 0x32, 6)
@@ -65,113 +83,105 @@ def accel_to_roll_pitch(ax, ay, az):
 
 
 # =========================
-# Датасет (ковзне вікно)
+# Dataset
 # =========================
-def build_window_dataset(series: np.ndarray, window_size: int):
-    """
-    X_t = [y_{t-window}, ..., y_{t-1}]
-    y_t = y_t
-    """
-    if len(series) <= window_size:
-        raise ValueError("Недостатньо даних для заданого WINDOW_SIZE")
-
-    X = []
-    y = []
-    for i in range(window_size, len(series)):
-        X.append(series[i - window_size:i])
+def build_window_dataset(series: np.ndarray, window: int):
+    # X_t = [y_{t-window},...,y_{t-1}], y_t = y_t
+    X, y = [], []
+    for i in range(window, len(series)):
+        X.append(series[i - window:i])
         y.append(series[i])
     return np.asarray(X, dtype=np.float32), np.asarray(y, dtype=np.float32)
 
+def estimate_fs(t_list):
+    if len(t_list) < 3:
+        return float("nan"), float("nan")
+    dts = np.diff(np.array(t_list, dtype=np.float64))
+    dt_med = float(np.median(dts))
+    fs = 1.0 / dt_med if dt_med > 0 else float("nan")
+    return fs, dt_med
+
 
 def main():
-    os.makedirs(OUT_DIR, exist_ok=True)
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    os.makedirs(RECORDS_DIR, exist_ok=True)
 
-    # I2C init
     bus = smbus.SMBus(I2C_BUS_ID)
     setup_adxl345(bus)
 
-    # Buffers
-    t_list = []
-    ax_list, ay_list, az_list = [], [], []
-    roll_list, pitch_list = [], []
+    log_path = os.path.join(RECORDS_DIR, ts_name("noise_train", "jsonl"))
 
-    # Rare progress prints
-    step = max(1, TRAIN_SAMPLES // 6)
-    next_info = step
+    t_all = []
+    roll_all = []
+    pitch_all = []
 
-    print(f"Start capture: TRAIN_SAMPLES={TRAIN_SAMPLES}, WINDOW_SIZE={WINDOW_SIZE}, SLEEP_SEC={SLEEP_SEC}")
-    print("IMPORTANT: sensor must be fixed (noise-only). Ctrl+C to stop early.")
+    print(f"TRAIN v2 (segmented): segments={SEGMENTS}, hold={HOLD_SECONDS}s, warmup={WARMUP_SECONDS}s, sleep={SLEEP_SEC}s")
+    print("Workflow: set position -> press Enter -> wait -> capture -> pause -> change position -> press Enter ...")
+    print(f"Log: {log_path}")
 
-    start = time.perf_counter()
+    with open(log_path, "w", encoding="utf-8") as f:
+        for seg in range(1, SEGMENTS + 1):
+            input(f"\n[{seg}/{SEGMENTS}] Set new static position and press Enter to START capture...")
 
-    try:
-        for i in range(TRAIN_SAMPLES):
-            t = time.perf_counter()
-            ax, ay, az = read_adxl345(bus)
-            roll, pitch = accel_to_roll_pitch(ax, ay, az)
+            # Warmup (затухання)
+            warmup_end = time.perf_counter() + WARMUP_SECONDS
+            while time.perf_counter() < warmup_end:
+                _ = read_adxl345(bus)
+                if SLEEP_SEC > 0:
+                    time.sleep(SLEEP_SEC)
 
-            t_list.append(t)
-            ax_list.append(ax); ay_list.append(ay); az_list.append(az)
-            roll_list.append(roll); pitch_list.append(pitch)
+            # Capture segment
+            seg_start = time.perf_counter()
+            seg_end = seg_start + HOLD_SECONDS
 
-            if (i + 1) == next_info:
-                print(f"Captured: {i + 1}/{TRAIN_SAMPLES}")
-                next_info += step
+            while time.perf_counter() < seg_end:
+                t = time.perf_counter()
+                ax, ay, az = read_adxl345(bus)
+                roll, pitch = accel_to_roll_pitch(ax, ay, az)
 
-            if SLEEP_SEC > 0:
-                time.sleep(SLEEP_SEC)
+                jsonl_write(f, {
+                    "t": float(t),
+                    "segment_id": int(seg),
+                    "ax": float(ax), "ay": float(ay), "az": float(az),
+                    "roll_raw": float(roll),
+                    "pitch_raw": float(pitch),
+                })
 
-    except KeyboardInterrupt:
-        print("\nCapture interrupted by user.")
+                t_all.append(t)
+                roll_all.append(roll)
+                pitch_all.append(pitch)
 
-    end = time.perf_counter()
+                if SLEEP_SEC > 0:
+                    time.sleep(SLEEP_SEC)
 
-    n = len(roll_list)
+            print(f"Segment {seg} captured.")
+
+    n = len(roll_all)
     if n <= WINDOW_SIZE + 5:
         raise RuntimeError(f"Too few samples for training: n={n}")
 
-    # Estimate fs from timestamps
-    t_arr = np.asarray(t_list, dtype=np.float64)
-    dt = np.diff(t_arr)
-    dt_med = float(np.median(dt)) if len(dt) else float("nan")
-    fs_est = (1.0 / dt_med) if dt_med and not math.isnan(dt_med) else float("nan")
+    fs, dt_med = estimate_fs(t_all)
 
-    # Save raw CSV
-    csv_path = os.path.join(OUT_DIR, f"{FILE_PREFIX}.csv")
-    with open(csv_path, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["t", "ax", "ay", "az", "roll_raw", "pitch_raw"])
-        for row in zip(t_list, ax_list, ay_list, az_list, roll_list, pitch_list):
-            w.writerow(row)
-
-    # Build datasets
-    roll_arr = np.asarray(roll_list, dtype=np.float32)
-    pitch_arr = np.asarray(pitch_list, dtype=np.float32)
+    roll_arr = np.asarray(roll_all, dtype=np.float32)
+    pitch_arr = np.asarray(pitch_all, dtype=np.float32)
 
     X_roll, y_roll = build_window_dataset(roll_arr, WINDOW_SIZE)
     X_pitch, y_pitch = build_window_dataset(pitch_arr, WINDOW_SIZE)
 
-    # Models: 
+    print("\nTraining models...")
     roll_model = SGDRegressor(max_iter=SGD_MAX_ITER, tol=SGD_TOL)
     pitch_model = SGDRegressor(max_iter=SGD_MAX_ITER, tol=SGD_TOL)
 
-    print("Training models...")
     roll_model.fit(X_roll, y_roll)
     pitch_model.fit(X_pitch, y_pitch)
 
-    # Save models
-    roll_path = os.path.join(OUT_DIR, "roll_model_v2.joblib")
-    pitch_path = os.path.join(OUT_DIR, "pitch_model_v2.joblib")
-
-    joblib.dump(roll_model, roll_path)
-    joblib.dump(pitch_model, pitch_path)
-
-    duration = end - start
+    joblib.dump(roll_model, ROLL_MODEL_PATH)
+    joblib.dump(pitch_model, PITCH_MODEL_PATH)
 
     print("Done.")
-    print(f"Saved: {csv_path}")
-    print(f"Saved: {roll_path}, {pitch_path}")
-    print(f"Captured n={n}, duration={duration:.2f}s, fs~{fs_est:.2f} Hz (median dt={dt_med:.6f}s)")
+    print(f"Samples total: {n}, fs~{fs:.2f} Hz (median dt={dt_med:.6f}s)")
+    print(f"Models: {ROLL_MODEL_PATH}, {PITCH_MODEL_PATH}")
+    print(f"Train log: {log_path}")
 
 
 if __name__ == "__main__":
