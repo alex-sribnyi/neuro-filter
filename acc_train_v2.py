@@ -181,8 +181,8 @@ def main():
     pitch_model.fit(X_pitch, y_pitch)
 
     # Save models
-    roll_path = os.path.join(OUT_DIR, "roll_model.joblib")
-    pitch_path = os.path.join(OUT_DIR, "pitch_model.joblib")
+    roll_path = os.path.join(OUT_DIR, "roll_model_v2.joblib")
+    pitch_path = os.path.join(OUT_DIR, "pitch_model_v2.joblib")
 
     joblib.dump(roll_model, roll_path)
     joblib.dump(pitch_model, pitch_path)
