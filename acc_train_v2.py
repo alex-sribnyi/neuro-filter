@@ -23,7 +23,7 @@ from sklearn.preprocessing import StandardScaler
 I2C_ADDR = 0x53
 I2C_BUS_ID = 1
 
-TRAIN_SAMPLES = 1200       # кількість відліків для збору (noise-only)
+TRAIN_SAMPLES = 1000       # кількість відліків для збору (noise-only)
 WINDOW_SIZE = 5            # розмір ковзного вікна
 SLEEP_SEC = 0.01           # пауза між відліками; 0 = без паузи
 
@@ -31,7 +31,7 @@ OUT_DIR = "models"
 FILE_PREFIX = "adxl345_noise"
 
 # SGD налаштування (можете змінювати пізніше, але зафіксуйте для статті)
-SGD_MAX_ITER = 2000
+SGD_MAX_ITER = 1000
 SGD_TOL = 1e-3
 SGD_ALPHA = 1e-4           # L2 регуляризація
 SGD_RANDOM_STATE = 42
@@ -151,30 +151,9 @@ def main():
     X_roll, y_roll = build_window_dataset(roll_arr, WINDOW_SIZE)
     X_pitch, y_pitch = build_window_dataset(pitch_arr, WINDOW_SIZE)
 
-    # Models: StandardScaler + SGDRegressor
-    roll_model = make_pipeline(
-        StandardScaler(),
-        SGDRegressor(
-            loss="squared_error",
-            penalty="l2",
-            alpha=SGD_ALPHA,
-            max_iter=SGD_MAX_ITER,
-            tol=SGD_TOL,
-            random_state=SGD_RANDOM_STATE
-        )
-    )
-
-    pitch_model = make_pipeline(
-        StandardScaler(),
-        SGDRegressor(
-            loss="squared_error",
-            penalty="l2",
-            alpha=SGD_ALPHA,
-            max_iter=SGD_MAX_ITER,
-            tol=SGD_TOL,
-            random_state=SGD_RANDOM_STATE
-        )
-    )
+    # Models: 
+    roll_model = SGDRegressor(max_iter=SGD_MAX_ITER, tol=SGD_TOL)
+    pitch_model = SGDRegressor(max_iter=SGD_MAX_ITER, tol=SGD_TOL)
 
     print("Training models...")
     roll_model.fit(X_roll, y_roll)
