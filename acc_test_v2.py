@@ -1,18 +1,33 @@
 #!/usr/bin/env python3
-# acc_test_v2.py
-# Онлайн-тест: ADXL345 + обчислення roll/pitch + SGD(Δ-model)/EMA/Median/Kalman онлайн.
-# Логування у JSONL з timestamp в імені файлу.
+# acc_train_v2.py
+# Навчання ML-фільтра (SGD) на Raspberry Pi з ADXL345 у форматі "статичні сегменти + пауза на зміну пози".
+#
+# ВАРІАНТ A (без teacher/EMA-trend):
+#   - Навчаємо не y[k], а приріст Δy[k] = y[k] - y[k-1]
+#   - У runtime: y_hat[k] = y_hat[k-1] + Δy_hat[k]
+#
+# Додатково:
+#   - Розширені ознаки: історія roll, pitch, ax, ay, az, |a| у ковзному вікні
+#   - Вікна НЕ перетинають межі segment_id
+#
+# Вихід:
+#   models/roll_model_v2.joblib
+#   models/pitch_model_v2.joblib
+#   records/noise_train_YYYY-MM-DD_HH-MM-SS.jsonl (лог навчання)
 
 import os
 import time
 import math
 import json
 from datetime import datetime
-from collections import deque
 
 import numpy as np
 import smbus
 import joblib
+
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import SGDRegressor
 
 
 # =========================
@@ -21,24 +36,25 @@ import joblib
 I2C_ADDR = 0x53
 I2C_BUS_ID = 1
 
+SEGMENTS = 10
+HOLD_SECONDS = 12.0
+SLEEP_SEC = 0.01
+
+WINDOW_SIZE = 5
+WARMUP_SECONDS = 0.7
+
 MODELS_DIR = "models"
 RECORDS_DIR = "records"
 
 ROLL_MODEL_PATH = os.path.join(MODELS_DIR, "roll_model_v2.joblib")
 PITCH_MODEL_PATH = os.path.join(MODELS_DIR, "pitch_model_v2.joblib")
 
-FILE_PREFIX = "dynamic_test"
-
-RUN_SECONDS = 90
-SLEEP_SEC = 0.01
-PRINT_EVERY = 400
-
-# Класичні фільтри (як і було)
-EMA_ALPHA = 0.2
-MEDIAN_WINDOW = 9   # каузальний
-KALMAN_Q = 1e-5
-KALMAN_R = 3e-4
-KALMAN_P0 = 1.0
+# SGD (стабільні параметри + StandardScaler)
+SGD_ALPHA = 1e-6
+SGD_ETA0 = 1e-3
+SGD_MAX_ITER = 8000
+SGD_TOL = 1e-4
+SGD_RANDOM_STATE = 42
 
 
 # =========================
@@ -51,13 +67,21 @@ def ts_name(prefix: str, ext: str) -> str:
 def jsonl_write(fp, obj):
     fp.write(json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n")
 
+def estimate_fs(t_list):
+    if len(t_list) < 3:
+        return float("nan"), float("nan")
+    dts = np.diff(np.array(t_list, dtype=np.float64))
+    dt_med = float(np.median(dts))
+    fs = 1.0 / dt_med if dt_med > 0 else float("nan")
+    return fs, dt_med
+
 
 # =========================
 # ADXL345
 # =========================
 def setup_adxl345(bus: smbus.SMBus):
-    bus.write_byte_data(I2C_ADDR, 0x2D, 0x08)
-    bus.write_byte_data(I2C_ADDR, 0x31, 0x08)
+    bus.write_byte_data(I2C_ADDR, 0x2D, 0x08)  # POWER_CTL: measurement
+    bus.write_byte_data(I2C_ADDR, 0x31, 0x08)  # DATA_FORMAT: full res ±2g
 
 def read_adxl345(bus: smbus.SMBus):
     data = bus.read_i2c_block_data(I2C_ADDR, 0x32, 6)
@@ -78,235 +102,198 @@ def accel_to_roll_pitch(ax, ay, az):
 
 
 # =========================
-# Фільтри
+# Dataset
 # =========================
-class EMA:
-    def __init__(self, alpha: float):
-        self.alpha = alpha
-        self.state = None
+def build_delta_dataset_segmented(
+    roll_raw: np.ndarray,
+    pitch_raw: np.ndarray,
+    ax: np.ndarray, ay: np.ndarray, az: np.ndarray,
+    seg_ids: np.ndarray,
+    window: int,
+    use_anorm: bool = True
+):
+    """
+    X_t = [roll_{t-window}..roll_{t-1},
+           pitch_{t-window}..pitch_{t-1},
+           ax_{t-window}..ax_{t-1},
+           ay_{...}, az_{...}, |a|_{...}]
+    y_t = Δroll_t  = roll_t  - roll_{t-1}
+    z_t = Δpitch_t = pitch_t - pitch_{t-1}
 
-    def update(self, x: float) -> float:
-        if self.state is None:
-            self.state = x
-        else:
-            self.state = self.alpha * x + (1.0 - self.alpha) * self.state
-        return self.state
+    Умова: індекси [t-window, ..., t] належать одному segment_id.
+    """
+    n = len(roll_raw)
+    if not (n == len(pitch_raw) == len(ax) == len(ay) == len(az) == len(seg_ids)):
+        raise ValueError("Усі масиви повинні мати однакову довжину")
 
-class MedianCausal:
-    def __init__(self, window: int):
-        if window % 2 == 0:
-            window += 1
-        self.buf = deque(maxlen=window)
+    if n < window + 2:
+        raise RuntimeError("Занадто мало даних для формування вікон")
 
-    def update(self, x: float) -> float:
-        self.buf.append(x)
-        arr = sorted(self.buf)
-        return arr[len(arr) // 2]
-
-class Kalman1D:
-    def __init__(self, Q: float, R: float, P0: float = 1.0):
-        self.Q = Q
-        self.R = R
-        self.P = P0
-        self.x = None
-
-    def update(self, z: float) -> float:
-        if self.x is None:
-            self.x = z
-            return self.x
-
-        x_pred = self.x
-        P_pred = self.P + self.Q
-
-        K = P_pred / (P_pred + self.R)
-        self.x = x_pred + K * (z - x_pred)
-        self.P = (1.0 - K) * P_pred
-        return self.x
-
-
-# =========================
-# SGD (Δ-model) helpers
-# =========================
-def load_delta_pack(path: str) -> dict:
-    pack = joblib.load(path)
-    if not isinstance(pack, dict):
-        raise TypeError(f"Model at {path} must be a dict pack (delta format). Got: {type(pack)}")
-
-    if pack.get("kind") != "delta":
-        raise ValueError(f"Model pack kind must be 'delta'. Got: {pack.get('kind')}")
-
-    if "model" not in pack:
-        raise KeyError("Model pack missing key 'model'")
-
-    if "window_size" not in pack:
-        raise KeyError("Model pack missing key 'window_size'")
-
-    return pack
-
-def build_feature_vector(
-    roll_buf, pitch_buf, ax_buf, ay_buf, az_buf, an_buf,
-    use_anorm: bool
-) -> np.ndarray:
-    # Порядок має збігатися з training: roll_hist, pitch_hist, ax_hist, ay_hist, az_hist, anorm_hist
     if use_anorm:
-        feat = np.concatenate([
-            np.asarray(roll_buf, dtype=np.float32),
-            np.asarray(pitch_buf, dtype=np.float32),
-            np.asarray(ax_buf, dtype=np.float32),
-            np.asarray(ay_buf, dtype=np.float32),
-            np.asarray(az_buf, dtype=np.float32),
-            np.asarray(an_buf, dtype=np.float32),
-        ], axis=0)
-    else:
-        feat = np.concatenate([
-            np.asarray(roll_buf, dtype=np.float32),
-            np.asarray(pitch_buf, dtype=np.float32),
-            np.asarray(ax_buf, dtype=np.float32),
-            np.asarray(ay_buf, dtype=np.float32),
-            np.asarray(az_buf, dtype=np.float32),
-        ], axis=0)
-    return feat.reshape(1, -1)
+        anorm = np.sqrt(ax * ax + ay * ay + az * az).astype(np.float32)
+
+    X, y_droll, y_dpitch = [], [], []
+
+    for t in range(window, n):
+        seg = seg_ids[t]
+        if not np.all(seg_ids[t - window:t + 1] == seg):
+            continue
+
+        r_hist = roll_raw[t - window:t]
+        p_hist = pitch_raw[t - window:t]
+        ax_hist = ax[t - window:t]
+        ay_hist = ay[t - window:t]
+        az_hist = az[t - window:t]
+
+        if use_anorm:
+            a_hist = anorm[t - window:t]
+            feat = np.concatenate([r_hist, p_hist, ax_hist, ay_hist, az_hist, a_hist], axis=0)
+        else:
+            feat = np.concatenate([r_hist, p_hist, ax_hist, ay_hist, az_hist], axis=0)
+
+        droll = roll_raw[t] - roll_raw[t - 1]
+        dpitch = pitch_raw[t] - pitch_raw[t - 1]
+
+        X.append(feat)
+        y_droll.append(droll)
+        y_dpitch.append(dpitch)
+
+    X = np.asarray(X, dtype=np.float32)
+    y_droll = np.asarray(y_droll, dtype=np.float32)
+    y_dpitch = np.asarray(y_dpitch, dtype=np.float32)
+
+    if len(X) == 0:
+        raise RuntimeError("Після сегментації не залишилось даних для навчання. Збільшіть HOLD_SECONDS або зменшіть WINDOW_SIZE.")
+
+    return X, y_droll, y_dpitch
+
+
+def make_sgd_pipeline():
+    return make_pipeline(
+        StandardScaler(),
+        SGDRegressor(
+            loss="squared_error",
+            penalty="l2",
+            alpha=SGD_ALPHA,
+            learning_rate="constant",
+            eta0=SGD_ETA0,
+            max_iter=SGD_MAX_ITER,
+            tol=SGD_TOL,
+            shuffle=True,
+            random_state=SGD_RANDOM_STATE,
+        )
+    )
 
 
 def main():
+    os.makedirs(MODELS_DIR, exist_ok=True)
     os.makedirs(RECORDS_DIR, exist_ok=True)
-
-    # --- Load delta-model packs ---
-    roll_pack = load_delta_pack(ROLL_MODEL_PATH)
-    pitch_pack = load_delta_pack(PITCH_MODEL_PATH)
-
-    roll_model = roll_pack["model"]
-    pitch_model = pitch_pack["model"]
-
-    # Вікно беремо з моделей (щоб не було розсинхрону)
-    W = int(roll_pack["window_size"])
-    if int(pitch_pack["window_size"]) != W:
-        raise ValueError("roll/pitch models have different window_size")
-
-    use_anorm = bool(roll_pack.get("use_anorm", True))
-    if bool(pitch_pack.get("use_anorm", True)) != use_anorm:
-        raise ValueError("roll/pitch models have different use_anorm")
 
     bus = smbus.SMBus(I2C_BUS_ID)
     setup_adxl345(bus)
 
-    log_path = os.path.join(RECORDS_DIR, ts_name(FILE_PREFIX, "jsonl"))
+    log_path = os.path.join(RECORDS_DIR, ts_name("noise_train", "jsonl"))
 
-    # --- Buffers for expanded features ---
-    roll_buf = deque(maxlen=W)
-    pitch_buf = deque(maxlen=W)
-    ax_buf = deque(maxlen=W)
-    ay_buf = deque(maxlen=W)
-    az_buf = deque(maxlen=W)
-    an_buf = deque(maxlen=W)  # |a|
+    t_all = []
+    roll_all, pitch_all = [], []
+    ax_all, ay_all, az_all = [], [], []
+    seg_all = []
 
-    # SGD integrated state
-    roll_sgd_state = None
-    pitch_sgd_state = None
-    sgd_ready = False  # стане True, коли вперше заповнимо буфери та ініціалізуємо state
-
-    ema_roll = EMA(EMA_ALPHA)
-    ema_pitch = EMA(EMA_ALPHA)
-
-    med_roll = MedianCausal(MEDIAN_WINDOW)
-    med_pitch = MedianCausal(MEDIAN_WINDOW)
-
-    kal_roll = Kalman1D(KALMAN_Q, KALMAN_R, KALMAN_P0)
-    kal_pitch = Kalman1D(KALMAN_Q, KALMAN_R, KALMAN_P0)
-
-    start = time.perf_counter()
-    end_time = start + RUN_SECONDS
-
-    print(f"TEST v2 (delta-ML): {RUN_SECONDS}s, sleep={SLEEP_SEC}, W={W}, use_anorm={use_anorm}")
+    print(f"TRAIN v2 (delta): segments={SEGMENTS}, hold={HOLD_SECONDS}s, warmup={WARMUP_SECONDS}s, sleep={SLEEP_SEC}s")
     print(f"Log: {log_path}")
 
-    i = 0
-    t_list = []
-
     with open(log_path, "w", encoding="utf-8") as f:
-        try:
-            while time.perf_counter() < end_time:
+        for seg in range(1, SEGMENTS + 1):
+            input(f"\n[{seg}/{SEGMENTS}] Set new static position and press Enter to START capture...")
+
+            warmup_end = time.perf_counter() + WARMUP_SECONDS
+            while time.perf_counter() < warmup_end:
+                _ = read_adxl345(bus)
+                if SLEEP_SEC > 0:
+                    time.sleep(SLEEP_SEC)
+
+            seg_end = time.perf_counter() + HOLD_SECONDS
+
+            while time.perf_counter() < seg_end:
                 t = time.perf_counter()
-
                 ax, ay, az = read_adxl345(bus)
-                an = math.sqrt(ax * ax + ay * ay + az * az)
-
                 roll, pitch = accel_to_roll_pitch(ax, ay, az)
-
-                # Update feature buffers
-                roll_buf.append(roll)
-                pitch_buf.append(pitch)
-                ax_buf.append(ax)
-                ay_buf.append(ay)
-                az_buf.append(az)
-                an_buf.append(an)
-
-                # --- SGD (Δ-model) ---
-                if len(roll_buf) == W:
-                    # Ініціалізуємо інтегратор один раз, коли вперше готові
-                    if not sgd_ready:
-                        roll_sgd_state = float(roll)
-                        pitch_sgd_state = float(pitch)
-                        sgd_ready = True
-
-                    X = build_feature_vector(
-                        roll_buf, pitch_buf, ax_buf, ay_buf, az_buf, an_buf,
-                        use_anorm=use_anorm
-                    )
-
-                    droll_hat = float(roll_model.predict(X)[0])
-                    dpitch_hat = float(pitch_model.predict(X)[0])
-
-                    roll_sgd_state += droll_hat
-                    pitch_sgd_state += dpitch_hat
-
-                    roll_sgd = float(roll_sgd_state)
-                    pitch_sgd = float(pitch_sgd_state)
-                else:
-                    # поки буфери не заповнені — повертаємо raw
-                    roll_sgd = float(roll)
-                    pitch_sgd = float(pitch)
-
-                # --- Classic filters (on raw) ---
-                roll_ema = float(ema_roll.update(roll))
-                pitch_ema = float(ema_pitch.update(pitch))
-
-                roll_med = float(med_roll.update(roll))
-                pitch_med = float(med_pitch.update(pitch))
-
-                roll_kal = float(kal_roll.update(roll))
-                pitch_kal = float(kal_pitch.update(pitch))
 
                 jsonl_write(f, {
                     "t": float(t),
+                    "segment_id": int(seg),
                     "ax": float(ax), "ay": float(ay), "az": float(az),
-                    "roll_raw": float(roll), "pitch_raw": float(pitch),
-
-                    "roll_sgd": roll_sgd, "pitch_sgd": pitch_sgd,
-                    "roll_ema": roll_ema, "pitch_ema": pitch_ema,
-                    "roll_med": roll_med, "pitch_med": pitch_med,
-                    "roll_kal": roll_kal, "pitch_kal": pitch_kal,
+                    "roll_raw": float(roll),
+                    "pitch_raw": float(pitch),
                 })
 
-                t_list.append(t)
-                i += 1
-                if i % PRINT_EVERY == 0:
-                    print(f"Samples: {i}")
+                t_all.append(t)
+                roll_all.append(roll); pitch_all.append(pitch)
+                ax_all.append(ax); ay_all.append(ay); az_all.append(az)
+                seg_all.append(seg)
 
                 if SLEEP_SEC > 0:
                     time.sleep(SLEEP_SEC)
 
-        except KeyboardInterrupt:
-            print("Interrupted by user.")
+            print(f"Segment {seg} captured.")
 
-    # fs estimate
-    if len(t_list) > 2:
-        dts = np.diff(np.array(t_list, dtype=np.float64))
-        dt_med = float(np.median(dts))
-        fs = 1.0 / dt_med if dt_med > 0 else float("nan")
-        print(f"Done. samples={len(t_list)}, fs~{fs:.2f} Hz (median dt={dt_med:.6f}s)")
-    else:
-        print("Done. Too few samples for fs.")
+    n = len(roll_all)
+    if n <= WINDOW_SIZE + 5:
+        raise RuntimeError(f"Too few samples for training: n={n}")
+
+    fs, dt_med = estimate_fs(t_all)
+
+    roll_raw = np.asarray(roll_all, dtype=np.float32)
+    pitch_raw = np.asarray(pitch_all, dtype=np.float32)
+    ax = np.asarray(ax_all, dtype=np.float32)
+    ay = np.asarray(ay_all, dtype=np.float32)
+    az = np.asarray(az_all, dtype=np.float32)
+    seg_ids = np.asarray(seg_all, dtype=np.int32)
+
+    X, y_droll, y_dpitch = build_delta_dataset_segmented(
+        roll_raw=roll_raw,
+        pitch_raw=pitch_raw,
+        ax=ax, ay=ay, az=az,
+        seg_ids=seg_ids,
+        window=WINDOW_SIZE,
+        use_anorm=True,
+    )
+
+    print(f"Usable windows: {len(X)} / total samples: {n}; fs~{fs:.2f} Hz (median dt={dt_med:.6f}s)")
+
+    roll_model = make_sgd_pipeline()
+    pitch_model = make_sgd_pipeline()
+
+    roll_model.fit(X, y_droll)
+    pitch_model.fit(X, y_dpitch)
+
+    # Зберігаємо як dict з метаданими: test-скрипт має знати, що це Δ-модель і які ознаки подавати.
+    roll_pack = {
+        "kind": "delta",
+        "target": "droll",
+        "window_size": WINDOW_SIZE,
+        "features": ["roll_hist", "pitch_hist", "ax_hist", "ay_hist", "az_hist", "anorm_hist"],
+        "use_anorm": True,
+        "model": roll_model,
+    }
+    pitch_pack = {
+        "kind": "delta",
+        "target": "dpitch",
+        "window_size": WINDOW_SIZE,
+        "features": ["roll_hist", "pitch_hist", "ax_hist", "ay_hist", "az_hist", "anorm_hist"],
+        "use_anorm": True,
+        "model": pitch_model,
+    }
+
+    joblib.dump(roll_pack, ROLL_MODEL_PATH)
+    joblib.dump(pitch_pack, PITCH_MODEL_PATH)
+
+    # sanity-check (коротко)
+    w_r = roll_model.named_steps["sgdregressor"].coef_
+    w_p = pitch_model.named_steps["sgdregressor"].coef_
+    print(f"Saved models: {ROLL_MODEL_PATH}, {PITCH_MODEL_PATH}")
+    print(f"Sanity |coef|max: roll={float(np.max(np.abs(w_r))):.6f}, pitch={float(np.max(np.abs(w_p))):.6f}")
+    print(f"Train log: {log_path}")
 
 
 if __name__ == "__main__":
