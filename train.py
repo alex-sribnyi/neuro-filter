@@ -7,13 +7,23 @@ import joblib
 # --- Параметри ---
 signal_length = 3000
 window_size = 7
-noise_std = 0.2
+noise_std = 0.1
 batch_size = 16
+
+def add_impulse_noise(signal, impulse_ratio=0.01, impulse_strength=1.0):
+    signal = signal.copy()
+    n_impulses = int(len(signal) * impulse_ratio)
+    indices = np.random.choice(len(signal), n_impulses, replace=False)
+    
+    # Генеруємо сплески: випадково -1 або +1
+    impulses = np.random.choice([-1, 1], size=n_impulses) * impulse_strength
+    signal[indices] += impulses
+    return signal
 
 # --- Генерація сигналу ---
 x = np.linspace(0, 8 * np.pi, signal_length)
 clean_signal = np.sin(x)
-noisy_signal = clean_signal + np.random.normal(0, noise_std, size=signal_length)
+noisy_signal = add_impulse_noise(clean_signal + np.random.normal(0, noise_std, size=signal_length))
 
 # --- Ініціалізація моделі та scaler'а ---
 model = SGDRegressor(penalty='l2', alpha=1e-4, learning_rate='constant', eta0=1e-2,

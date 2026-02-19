@@ -10,7 +10,7 @@ from filterpy.kalman import MerweScaledSigmaPoints
 # --- Параметри ---
 window_size = 7
 signal_length = 3000
-noise_std = 0.01
+noise_std = 0.1
 
 # --- Завантаження моделі та scaler ---
 model = joblib.load('sgd_model.joblib')
@@ -66,21 +66,21 @@ def kalman_filter(signal, dt=1.0, R=0.05, Q=1e-2):
     return np.array(filtered)
 
 # --- Генерація нового сигналу (наприклад, sin(x²)) ---
-# def add_impulse_noise(signal, impulse_ratio=0.01, impulse_strength=3.0):
-#     signal = signal.copy()
-#     n_impulses = int(len(signal) * impulse_ratio)
-#     indices = np.random.choice(len(signal), n_impulses, replace=False)
+def add_impulse_noise(signal, impulse_ratio=0.01, impulse_strength=1.0):
+    signal = signal.copy()
+    n_impulses = int(len(signal) * impulse_ratio)
+    indices = np.random.choice(len(signal), n_impulses, replace=False)
     
-#     # Генеруємо сплески: випадково -1 або +1
-#     impulses = np.random.choice([-1, 1], size=n_impulses) * impulse_strength
-#     signal[indices] += impulses
-#     return signal
+    # Генеруємо сплески: випадково -1 або +1
+    impulses = np.random.choice([-1, 1], size=n_impulses) * impulse_strength
+    signal[indices] += impulses
+    return signal
 
 x = np.linspace(0, 12, signal_length)
 clean_signal = np.sin(x) + 0.5 * np.sin(3 * x)
 # clean_signal = np.zeros(signal_length)  # Зворотний лінійний спад
 noisy_signal = clean_signal + np.random.normal(0, noise_std, size=signal_length)
-# noisy_signal = add_impulse_noise(noisy_signal)
+noisy_signal = add_impulse_noise(noisy_signal)
 
 # --- Обробка через модель ---
 predicted_sgd = np.full(signal_length, np.nan)
