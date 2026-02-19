@@ -123,12 +123,29 @@ class Kalman1D:
         self.P = (1.0 - K) * P_pred
         return self.x
 
+def unwrap_model(obj):
+    # підтримка двох форматів: model або pack(dict)
+    if isinstance(obj, dict):
+        if "model" in obj:
+            return obj["model"], obj.get("window_size", None)
+        raise KeyError("Model pack is dict but has no 'model' key")
+    return obj, None
 
 def main():
     os.makedirs(RECORDS_DIR, exist_ok=True)
 
-    roll_model = joblib.load(ROLL_MODEL_PATH)
-    pitch_model = joblib.load(PITCH_MODEL_PATH)
+    roll_obj = joblib.load(ROLL_MODEL_PATH)
+    pitch_obj = joblib.load(PITCH_MODEL_PATH)
+
+    print(type(roll_obj), roll_obj.keys())
+
+    roll_model, W_roll = unwrap_model(roll_obj)
+    pitch_model, W_pitch = unwrap_model(pitch_obj)
+
+    if W_roll is not None:
+        WINDOW_SIZE_SGD = int(W_roll)
+    if W_pitch is not None and int(W_pitch) != WINDOW_SIZE_SGD:
+        raise ValueError("roll/pitch models have different window_size")
 
     bus = smbus.SMBus(I2C_BUS_ID)
     setup_adxl345(bus)
