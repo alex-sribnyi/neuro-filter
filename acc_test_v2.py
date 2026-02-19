@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # acc_test_v2.py
 # Онлайн-тест: ADXL345 + roll/pitch + SGD(ML)/EMA/Median/Kalman онлайн.
-# Моделі: Pipeline(StandardScaler + SGDRegressor), треновані на вікні WINDOW_SIZE_SGD=5 (roll-only, pitch-only).
+# Моделі: Pipeline(StandardScaler + SGDRegressor).
 # Логування у JSONL з timestamp у назві файлу.
 
 import os
@@ -34,8 +34,8 @@ RUN_SECONDS = 90
 SLEEP_SEC = 0.01
 PRINT_EVERY = 400
 
-# Має збігатися з WINDOW_SIZE у train
-WINDOW_SIZE_SGD = 5
+# fallback, якщо не зможемо визначити W з моделі
+WINDOW_SIZE_FALLBACK = 5
 
 # Фіксовані параметри фільтрів під W=5
 EMA_ALPHA = 1/3
@@ -77,7 +77,6 @@ def read_adxl345(bus: smbus.SMBus):
     return ax, ay, az
 
 def accel_to_roll_pitch(ax, ay, az):
-    # Має бути 1:1 як у train
     roll = math.atan2(ay, az) * 180.0 / math.pi
     pitch = math.atan2(-ax, math.sqrt(ay * ay + az * az)) * 180.0 / math.pi
     return roll, pitch
@@ -134,12 +133,61 @@ class Kalman1D:
         return float(self.x)
 
 
+# =========================
+# Model helpers
+# =========================
+def infer_expected_features(pipeline) -> int | None:
+    """
+    Для Pipeline(StandardScaler -> SGDRegressor) дістанемо очікувану кількість ознак.
+    Працює якщо StandardScaler вже fitted.
+    """
+    # try sklearn pipeline API
+    scaler = None
+    if hasattr(pipeline, "named_steps"):
+        scaler = pipeline.named_steps.get("standardscaler", None)
+
+    if scaler is None:
+        return None
+
+    # у fitted scaler є n_features_in_
+    n = getattr(scaler, "n_features_in_", None)
+    if n is None:
+        # fallback: mean_ length (також лише після fit)
+        mean_ = getattr(scaler, "mean_", None)
+        if mean_ is not None:
+            return int(len(mean_))
+        return None
+    return int(n)
+
+def infer_window_from_nfeatures(n_features: int) -> int:
+    """
+    У вашому train: X має форму [W] (тільки roll або pitch).
+    Тобто n_features == W.
+    """
+    return int(n_features)
+
+
 def main():
     os.makedirs(RECORDS_DIR, exist_ok=True)
 
     # --- load models (Pipeline) ---
     roll_model = joblib.load(ROLL_MODEL_PATH)
     pitch_model = joblib.load(PITCH_MODEL_PATH)
+
+    # --- infer W from model (safer than hardcoding) ---
+    nfr = infer_expected_features(roll_model)
+    nfp = infer_expected_features(pitch_model)
+
+    if nfr is None or nfp is None:
+        W = WINDOW_SIZE_FALLBACK
+    else:
+        if nfr != nfp:
+            raise ValueError(f"roll/pitch models expect different n_features: roll={nfr}, pitch={nfp}")
+        W = infer_window_from_nfeatures(nfr)
+
+    # sanity: W must be odd? not required; just positive
+    if W <= 0:
+        raise RuntimeError(f"Invalid inferred window size W={W}")
 
     # --- i2c ---
     bus = smbus.SMBus(I2C_BUS_ID)
@@ -148,8 +196,8 @@ def main():
     log_path = os.path.join(RECORDS_DIR, ts_name(FILE_PREFIX, "jsonl"))
 
     # --- buffers for SGD ---
-    roll_buf = deque(maxlen=WINDOW_SIZE_SGD)
-    pitch_buf = deque(maxlen=WINDOW_SIZE_SGD)
+    roll_buf = deque(maxlen=W)
+    pitch_buf = deque(maxlen=W)
 
     # --- classic filters ---
     ema_roll = EMA(EMA_ALPHA)
@@ -164,7 +212,7 @@ def main():
     start = time.perf_counter()
     end_time = start + RUN_SECONDS
 
-    print(f"TEST v2: {RUN_SECONDS}s, sleep={SLEEP_SEC}, W={WINDOW_SIZE_SGD}")
+    print(f"TEST v2: {RUN_SECONDS}s, sleep={SLEEP_SEC}, W(from model)={W}")
     print(f"Filters: EMA_ALPHA={EMA_ALPHA}, MEDIAN_WINDOW={MEDIAN_WINDOW}, "
           f"KF(Q={KALMAN_Q:.3e}, R={KALMAN_R:.3e}, P0={KALMAN_P0:.3e})")
     print(f"Log: {log_path}")
@@ -185,9 +233,12 @@ def main():
                 pitch_buf.append(pitch)
 
                 # SGD output (поки буфер не заповнений — raw)
-                if len(roll_buf) == WINDOW_SIZE_SGD:
+                if len(roll_buf) == W:
                     Xr = np.array(roll_buf, dtype=np.float32).reshape(1, -1)
                     Xp = np.array(pitch_buf, dtype=np.float32).reshape(1, -1)
+
+                    # якщо модель очікує іншу кількість ознак — впадемо тут,
+                    # але тепер це буде через неправильні моделі, а не код
                     roll_sgd = float(roll_model.predict(Xr)[0])
                     pitch_sgd = float(pitch_model.predict(Xp)[0])
                 else:
