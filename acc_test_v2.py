@@ -123,84 +123,38 @@ class Kalman1D:
         self.P = (1.0 - K) * P_pred
         return self.x
 
-def load_pack(path: str) -> dict:
-    pack = joblib.load(path)
-    if not isinstance(pack, dict):
-        raise TypeError(f"Expected dict pack in {path}, got {type(pack)}")
-    for k in ("kind", "window_size", "use_anorm", "model"):
-        if k not in pack:
-            raise KeyError(f"Pack in {path} missing key '{k}'")
-    return pack
-
-def build_features(
-    roll_buf, pitch_buf, ax_buf, ay_buf, az_buf, an_buf,
-    use_anorm: bool
-) -> np.ndarray:
-    # порядок має збігатися з train: roll, pitch, ax, ay, az, (|a|)
-    if use_anorm:
-        x = np.concatenate([
-            np.asarray(roll_buf, dtype=np.float32),
-            np.asarray(pitch_buf, dtype=np.float32),
-            np.asarray(ax_buf, dtype=np.float32),
-            np.asarray(ay_buf, dtype=np.float32),
-            np.asarray(az_buf, dtype=np.float32),
-            np.asarray(an_buf, dtype=np.float32),
-        ], axis=0)
-    else:
-        x = np.concatenate([
-            np.asarray(roll_buf, dtype=np.float32),
-            np.asarray(pitch_buf, dtype=np.float32),
-            np.asarray(ax_buf, dtype=np.float32),
-            np.asarray(ay_buf, dtype=np.float32),
-            np.asarray(az_buf, dtype=np.float32),
-        ], axis=0)
-    return x.reshape(1, -1)
+def unwrap_model(obj):
+    # підтримка двох форматів: model або pack(dict)
+    if isinstance(obj, dict):
+        if "model" in obj:
+            return obj["model"], obj.get("window_size", None)
+        raise KeyError("Model pack is dict but has no 'model' key")
+    return obj, None
 
 def main():
     os.makedirs(RECORDS_DIR, exist_ok=True)
 
-    # --- load packs (dict) ---
-    roll_pack = load_pack(ROLL_MODEL_PATH)
-    pitch_pack = load_pack(PITCH_MODEL_PATH)
+    roll_obj = joblib.load(ROLL_MODEL_PATH)
+    pitch_obj = joblib.load(PITCH_MODEL_PATH)
 
-    # sanity prints (можна прибрати потім)
-    print(type(roll_pack), roll_pack.keys())
+    print(type(roll_obj), roll_obj.keys())
 
-    # --- sync params from packs ---
-    W = int(roll_pack["window_size"])
-    if int(pitch_pack["window_size"]) != W:
-        raise ValueError("roll/pitch packs have different window_size")
+    roll_model, W_roll = unwrap_model(roll_obj)
+    pitch_model, W_pitch = unwrap_model(pitch_obj)
 
-    use_anorm = bool(roll_pack["use_anorm"])
-    if bool(pitch_pack["use_anorm"]) != use_anorm:
-        raise ValueError("roll/pitch packs have different use_anorm")
+    if W_roll is not None:
+        WINDOW_SIZE_SGD = int(W_roll)
+    if W_pitch is not None and int(W_pitch) != WINDOW_SIZE_SGD:
+        raise ValueError("roll/pitch models have different window_size")
 
-    kind = str(roll_pack["kind"])
-    if str(pitch_pack["kind"]) != kind:
-        raise ValueError("roll/pitch packs have different kind")
-
-    roll_model = roll_pack["model"]
-    pitch_model = pitch_pack["model"]
-
-    # --- i2c ---
     bus = smbus.SMBus(I2C_BUS_ID)
     setup_adxl345(bus)
 
     log_path = os.path.join(RECORDS_DIR, ts_name(FILE_PREFIX, "jsonl"))
 
-    # --- buffers for expanded features (must match training) ---
-    roll_buf  = deque(maxlen=W)
-    pitch_buf = deque(maxlen=W)
-    ax_buf    = deque(maxlen=W)
-    ay_buf    = deque(maxlen=W)
-    az_buf    = deque(maxlen=W)
-    an_buf    = deque(maxlen=W)  # |a|
+    roll_buf = deque(maxlen=WINDOW_SIZE_SGD)
+    pitch_buf = deque(maxlen=WINDOW_SIZE_SGD)
 
-    # If kind == "delta", we need integrator states
-    roll_state = None
-    pitch_state = None
-
-    # --- classic filters ---
     ema_roll = EMA(EMA_ALPHA)
     ema_pitch = EMA(EMA_ALPHA)
 
@@ -213,7 +167,7 @@ def main():
     start = time.perf_counter()
     end_time = start + RUN_SECONDS
 
-    print(f"TEST v2: {RUN_SECONDS}s, sleep={SLEEP_SEC}, W={W}, kind={kind}, use_anorm={use_anorm}")
+    print(f"TEST v2: {RUN_SECONDS}s, sleep={SLEEP_SEC}")
     print(f"Log: {log_path}")
 
     i = 0
@@ -225,44 +179,21 @@ def main():
                 t = time.perf_counter()
 
                 ax, ay, az = read_adxl345(bus)
-                an = math.sqrt(ax*ax + ay*ay + az*az)
                 roll, pitch = accel_to_roll_pitch(ax, ay, az)
 
-                # update buffers (must be BEFORE feature build for next step)
                 roll_buf.append(roll)
                 pitch_buf.append(pitch)
-                ax_buf.append(ax)
-                ay_buf.append(ay)
-                az_buf.append(az)
-                an_buf.append(an)
 
-                # --- SGD/ML output ---
-                if len(roll_buf) == W:
-                    X = build_features(roll_buf, pitch_buf, ax_buf, ay_buf, az_buf, an_buf, use_anorm)
-
-                    if kind == "delta":
-                        # model predicts delta; integrate
-                        if roll_state is None:
-                            roll_state = float(roll_buf[-1])
-                            pitch_state = float(pitch_buf[-1])
-
-                        droll = float(roll_model.predict(X)[0])
-                        dpitch = float(pitch_model.predict(X)[0])
-
-                        roll_state += droll
-                        pitch_state += dpitch
-
-                        roll_sgd = float(roll_state)
-                        pitch_sgd = float(pitch_state)
-                    else:
-                        # model predicts absolute value
-                        roll_sgd = float(roll_model.predict(X)[0])
-                        pitch_sgd = float(pitch_model.predict(X)[0])
+                # SGD output (поки буфер не заповнений — raw)
+                if len(roll_buf) == WINDOW_SIZE_SGD:
+                    Xr = np.array(roll_buf, dtype=np.float32).reshape(1, -1)
+                    Xp = np.array(pitch_buf, dtype=np.float32).reshape(1, -1)
+                    roll_sgd = float(roll_model.predict(Xr)[0])
+                    pitch_sgd = float(pitch_model.predict(Xp)[0])
                 else:
                     roll_sgd = float(roll)
                     pitch_sgd = float(pitch)
 
-                # --- classic filters on raw ---
                 roll_ema = float(ema_roll.update(roll))
                 pitch_ema = float(ema_pitch.update(pitch))
 
