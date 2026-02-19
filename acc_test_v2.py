@@ -35,11 +35,11 @@ PRINT_EVERY = 400
 
 WINDOW_SIZE_SGD = 5
 
-EMA_ALPHA = 1/3
-MEDIAN_WINDOW = 5
-KALMAN_Q = 1.38e-2
-KALMAN_R = 2.3e-3
-KALMAN_P0 = KALMAN_R
+EMA_ALPHA = 0.2
+MEDIAN_WINDOW = 9   # каузальний
+KALMAN_Q = 1e-5
+KALMAN_R = 3e-4
+KALMAN_P0 = 1.0
 
 
 # =========================
