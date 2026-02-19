@@ -4,6 +4,8 @@ import time
 import math
 import joblib
 import numpy as np
+import matplotlib.pyplot as plt
+from collections import deque
 
 # === Константи ===
 I2C_ADDR = 0x53

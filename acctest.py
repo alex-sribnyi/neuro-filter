@@ -7,8 +7,8 @@ import sys
 from collections import deque
 
 # === Налаштування ===
-INPUT_PORT = 'COM3'
-OUTPUT_PORT = 'COM4'
+INPUT_PORT = 'COM10'
+OUTPUT_PORT = 'COM11'
 BAUD = 115200
 WINDOW_SIZE = 5
 
