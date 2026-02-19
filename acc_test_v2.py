@@ -40,9 +40,6 @@ KALMAN_Q = 1e-5
 KALMAN_R = 3e-4
 KALMAN_P0 = 1.0
 
-# SGD Δ-model stabilization (не teacher, а стабілізація інтегратора)
-SGD_DMAX = 6.0      # обмеження |Δ| (deg/sample). Старт 4..8.
-SGD_BETA = 0.006    # якір до raw (0.002..0.02). Старт 0.006.
 
 # =========================
 # Utilities
@@ -239,10 +236,10 @@ def main():
                 # --- SGD (Δ-model) ---
                 if len(roll_buf) == W:
                     if not sgd_ready:
-                        # Ініціалізуємо стан близько до поточного вимірювання,
-                        # щоб не стартувати з "порожнього" інтегратора
-                        roll_sgd_state = float(roll)
-                        pitch_sgd_state = float(pitch)
+                        # Ініціалізуємо стан на попередньому доступному raw,
+                        # щоб перший інтегрований крок стартував адекватно
+                        roll_sgd_state = float(roll_buf[-1])
+                        pitch_sgd_state = float(pitch_buf[-1])
                         sgd_ready = True
 
                     X = build_feature_vector(
@@ -253,24 +250,8 @@ def main():
                     droll_hat = float(roll_model.predict(X)[0])
                     dpitch_hat = float(pitch_model.predict(X)[0])
 
-                    # 1) Clipping (захист від спайків Δ)
-                    if droll_hat > SGD_DMAX:
-                        droll_hat = SGD_DMAX
-                    elif droll_hat < -SGD_DMAX:
-                        droll_hat = -SGD_DMAX
-
-                    if dpitch_hat > SGD_DMAX:
-                        dpitch_hat = SGD_DMAX
-                    elif dpitch_hat < -SGD_DMAX:
-                        dpitch_hat = -SGD_DMAX
-
-                    # 2) Інтеграція Δ
                     roll_sgd_state += droll_hat
                     pitch_sgd_state += dpitch_hat
-
-                    # 3) Leaky anchor до raw (анти-дрейф)
-                    roll_sgd_state = (1.0 - SGD_BETA) * roll_sgd_state + SGD_BETA * float(roll)
-                    pitch_sgd_state = (1.0 - SGD_BETA) * pitch_sgd_state + SGD_BETA * float(pitch)
 
                     roll_sgd = float(roll_sgd_state)
                     pitch_sgd = float(pitch_sgd_state)
