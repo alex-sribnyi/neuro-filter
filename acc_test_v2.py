@@ -233,20 +233,13 @@ def main():
 
                 roll, pitch = accel_to_roll_pitch(ax, ay, az)
 
-                # Update feature buffers
-                roll_buf.append(roll)
-                pitch_buf.append(pitch)
-                ax_buf.append(ax)
-                ay_buf.append(ay)
-                az_buf.append(az)
-                an_buf.append(an)
-
                 # --- SGD (Δ-model) ---
                 if len(roll_buf) == W:
-                    # Ініціалізуємо інтегратор один раз, коли вперше готові
                     if not sgd_ready:
-                        roll_sgd_state = float(roll)
-                        pitch_sgd_state = float(pitch)
+                        # Ініціалізуємо стан на попередньому доступному raw,
+                        # щоб перший інтегрований крок стартував адекватно
+                        roll_sgd_state = float(roll_buf[-1])
+                        pitch_sgd_state = float(pitch_buf[-1])
                         sgd_ready = True
 
                     X = build_feature_vector(
@@ -263,9 +256,16 @@ def main():
                     roll_sgd = float(roll_sgd_state)
                     pitch_sgd = float(pitch_sgd_state)
                 else:
-                    # поки буфери не заповнені — повертаємо raw
                     roll_sgd = float(roll)
                     pitch_sgd = float(pitch)
+
+                # Update feature buffers
+                roll_buf.append(roll)
+                pitch_buf.append(pitch)
+                ax_buf.append(ax)
+                ay_buf.append(ay)
+                az_buf.append(az)
+                an_buf.append(an)
 
                 # --- Classic filters (on raw) ---
                 roll_ema = float(ema_roll.update(roll))
