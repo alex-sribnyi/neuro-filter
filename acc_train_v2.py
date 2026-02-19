@@ -36,6 +36,9 @@ SEGMENTS = 10
 HOLD_SECONDS = 12.0
 SLEEP_SEC = 0.01
 
+ZERO_EPS = 1e-9
+MAX_BAD_STREAK = 25     # скільки підряд "поганих" семплів допустимо
+
 WINDOW_SIZE = 5
 WARMUP_SECONDS = 0.7
 
@@ -143,6 +146,8 @@ def main():
     print("Workflow: set position -> press Enter -> wait -> capture -> pause -> change position -> press Enter ...")
     print(f"Log: {log_path}")
 
+    bad_streak = 0
+
     with open(log_path, "w", encoding="utf-8") as f:
         for seg in range(1, SEGMENTS + 1):
             input(f"\n[{seg}/{SEGMENTS}] Set new static position and press Enter to START capture...")
@@ -150,7 +155,16 @@ def main():
             # Warmup (затухання)
             warmup_end = time.perf_counter() + WARMUP_SECONDS
             while time.perf_counter() < warmup_end:
-                _ = read_adxl345(bus)
+                ax, ay, az = read_adxl345(bus)
+                if abs(ax) < ZERO_EPS and abs(ay) < ZERO_EPS and abs(az) < ZERO_EPS:
+                    bad_streak += 1
+                    if bad_streak >= MAX_BAD_STREAK:
+                        print("ERROR: ADXL345 returns zeros repeatedly. Reinitializing sensor...")
+                        setup_adxl345(bus)
+                        bad_streak = 0
+                    continue
+                else:
+                    bad_streak = 0
                 if SLEEP_SEC > 0:
                     time.sleep(SLEEP_SEC)
 

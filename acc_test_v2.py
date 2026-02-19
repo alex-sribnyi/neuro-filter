@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # acc_test_v2.py
-# Онлайн-тест: ADXL345 + обчислення roll/pitch + SGD/EMA/Median/Kalman онлайн.
-# Логування у JSONL з timestamp в імені файлу.
+# Онлайн-тест: ADXL345 + roll/pitch + SGD(ML)/EMA/Median/Kalman онлайн.
+# Моделі: Pipeline(StandardScaler + SGDRegressor), треновані на вікні WINDOW_SIZE_SGD=5 (roll-only, pitch-only).
+# Логування у JSONL з timestamp у назві файлу.
 
 import os
 import time
@@ -33,13 +34,16 @@ RUN_SECONDS = 90
 SLEEP_SEC = 0.01
 PRINT_EVERY = 400
 
+# Має збігатися з WINDOW_SIZE у train
 WINDOW_SIZE_SGD = 5
 
-EMA_ALPHA = 0.2
-MEDIAN_WINDOW = 9   # каузальний
-KALMAN_Q = 1e-5
-KALMAN_R = 3e-4
-KALMAN_P0 = 1.0
+# Фіксовані параметри фільтрів під W=5
+EMA_ALPHA = 1/3
+MEDIAN_WINDOW = 5
+
+KALMAN_R = 1.38e-2
+KALMAN_Q = KALMAN_R / 6
+KALMAN_P0 = KALMAN_R
 
 
 # =========================
@@ -57,8 +61,8 @@ def jsonl_write(fp, obj):
 # ADXL345
 # =========================
 def setup_adxl345(bus: smbus.SMBus):
-    bus.write_byte_data(I2C_ADDR, 0x2D, 0x08)
-    bus.write_byte_data(I2C_ADDR, 0x31, 0x08)
+    bus.write_byte_data(I2C_ADDR, 0x2D, 0x08)  # POWER_CTL measurement
+    bus.write_byte_data(I2C_ADDR, 0x31, 0x08)  # DATA_FORMAT full res ±2g
 
 def read_adxl345(bus: smbus.SMBus):
     data = bus.read_i2c_block_data(I2C_ADDR, 0x32, 6)
@@ -73,6 +77,7 @@ def read_adxl345(bus: smbus.SMBus):
     return ax, ay, az
 
 def accel_to_roll_pitch(ax, ay, az):
+    # Має бути 1:1 як у train
     roll = math.atan2(ay, az) * 180.0 / math.pi
     pitch = math.atan2(-ax, math.sqrt(ay * ay + az * az)) * 180.0 / math.pi
     return roll, pitch
@@ -83,38 +88,42 @@ def accel_to_roll_pitch(ax, ay, az):
 # =========================
 class EMA:
     def __init__(self, alpha: float):
-        self.alpha = alpha
+        self.alpha = float(alpha)
         self.state = None
 
     def update(self, x: float) -> float:
+        x = float(x)
         if self.state is None:
             self.state = x
         else:
             self.state = self.alpha * x + (1.0 - self.alpha) * self.state
-        return self.state
+        return float(self.state)
 
 class MedianCausal:
     def __init__(self, window: int):
+        window = int(window)
         if window % 2 == 0:
             window += 1
         self.buf = deque(maxlen=window)
 
     def update(self, x: float) -> float:
-        self.buf.append(x)
+        self.buf.append(float(x))
         arr = sorted(self.buf)
-        return arr[len(arr) // 2]
+        return float(arr[len(arr) // 2])
 
 class Kalman1D:
-    def __init__(self, Q: float, R: float, P0: float = 1.0):
-        self.Q = Q
-        self.R = R
-        self.P = P0
+    # 1D KF: x_k = x_{k-1} + w, z_k = x_k + v
+    def __init__(self, Q: float, R: float, P0: float):
+        self.Q = float(Q)
+        self.R = float(R)
+        self.P = float(P0)
         self.x = None
 
     def update(self, z: float) -> float:
+        z = float(z)
         if self.x is None:
             self.x = z
-            return self.x
+            return float(self.x)
 
         x_pred = self.x
         P_pred = self.P + self.Q
@@ -122,23 +131,27 @@ class Kalman1D:
         K = P_pred / (P_pred + self.R)
         self.x = x_pred + K * (z - x_pred)
         self.P = (1.0 - K) * P_pred
-        return self.x
+        return float(self.x)
 
 
 def main():
     os.makedirs(RECORDS_DIR, exist_ok=True)
 
+    # --- load models (Pipeline) ---
     roll_model = joblib.load(ROLL_MODEL_PATH)
     pitch_model = joblib.load(PITCH_MODEL_PATH)
 
+    # --- i2c ---
     bus = smbus.SMBus(I2C_BUS_ID)
     setup_adxl345(bus)
 
     log_path = os.path.join(RECORDS_DIR, ts_name(FILE_PREFIX, "jsonl"))
 
+    # --- buffers for SGD ---
     roll_buf = deque(maxlen=WINDOW_SIZE_SGD)
     pitch_buf = deque(maxlen=WINDOW_SIZE_SGD)
 
+    # --- classic filters ---
     ema_roll = EMA(EMA_ALPHA)
     ema_pitch = EMA(EMA_ALPHA)
 
@@ -151,7 +164,9 @@ def main():
     start = time.perf_counter()
     end_time = start + RUN_SECONDS
 
-    print(f"TEST v2: {RUN_SECONDS}s, sleep={SLEEP_SEC}")
+    print(f"TEST v2: {RUN_SECONDS}s, sleep={SLEEP_SEC}, W={WINDOW_SIZE_SGD}")
+    print(f"Filters: EMA_ALPHA={EMA_ALPHA}, MEDIAN_WINDOW={MEDIAN_WINDOW}, "
+          f"KF(Q={KALMAN_Q:.3e}, R={KALMAN_R:.3e}, P0={KALMAN_P0:.3e})")
     print(f"Log: {log_path}")
 
     i = 0
@@ -165,6 +180,7 @@ def main():
                 ax, ay, az = read_adxl345(bus)
                 roll, pitch = accel_to_roll_pitch(ax, ay, az)
 
+                # update buffers
                 roll_buf.append(roll)
                 pitch_buf.append(pitch)
 
@@ -178,23 +194,25 @@ def main():
                     roll_sgd = float(roll)
                     pitch_sgd = float(pitch)
 
-                roll_ema = float(ema_roll.update(roll))
-                pitch_ema = float(ema_pitch.update(pitch))
+                # classic filters on raw
+                roll_ema = ema_roll.update(roll)
+                pitch_ema = ema_pitch.update(pitch)
 
-                roll_med = float(med_roll.update(roll))
-                pitch_med = float(med_pitch.update(pitch))
+                roll_med = med_roll.update(roll)
+                pitch_med = med_pitch.update(pitch)
 
-                roll_kal = float(kal_roll.update(roll))
-                pitch_kal = float(kal_pitch.update(pitch))
+                roll_kal = kal_roll.update(roll)
+                pitch_kal = kal_pitch.update(pitch)
 
                 jsonl_write(f, {
                     "t": float(t),
                     "ax": float(ax), "ay": float(ay), "az": float(az),
                     "roll_raw": float(roll), "pitch_raw": float(pitch),
-                    "roll_sgd": roll_sgd, "pitch_sgd": pitch_sgd,
-                    "roll_ema": roll_ema, "pitch_ema": pitch_ema,
-                    "roll_med": roll_med, "pitch_med": pitch_med,
-                    "roll_kal": roll_kal, "pitch_kal": pitch_kal,
+
+                    "roll_sgd": roll_sgd,   "pitch_sgd": pitch_sgd,
+                    "roll_ema": roll_ema,   "pitch_ema": pitch_ema,
+                    "roll_med": roll_med,   "pitch_med": pitch_med,
+                    "roll_kal": roll_kal,   "pitch_kal": pitch_kal,
                 })
 
                 t_list.append(t)
