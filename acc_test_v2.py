@@ -35,14 +35,14 @@ SLEEP_SEC = 0.01
 PRINT_EVERY = 400
 
 # fallback, якщо не зможемо визначити W з моделі
-WINDOW_SIZE_FALLBACK = 5
+WINDOW_SIZE_FALLBACK = 9
 
-# Фіксовані параметри фільтрів під W=5
-EMA_ALPHA = 1/3
-MEDIAN_WINDOW = 5
+# Фіксовані параметри фільтрів під W=9
+EMA_ALPHA = 0.2
+MEDIAN_WINDOW = 9
 
 KALMAN_R = 1.38e-2
-KALMAN_Q = KALMAN_R / 6
+KALMAN_Q = KALMAN_R / 20
 KALMAN_P0 = KALMAN_R
 
 
