@@ -39,7 +39,7 @@ SLEEP_SEC = 0.01
 ZERO_EPS = 1e-9
 MAX_BAD_STREAK = 25     # скільки підряд "поганих" семплів допустимо
 
-WINDOW_SIZE = 9
+WINDOW_SIZE = 5
 WARMUP_SECONDS = 0.7
 
 MODELS_DIR = "models"
