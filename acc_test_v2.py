@@ -35,9 +35,9 @@ SLEEP_SEC = 0.01
 PRINT_EVERY = 400
 
 # fallback, якщо не зможемо визначити W з моделі
-WINDOW_SIZE_FALLBACK = 15
+WINDOW_SIZE_FALLBACK = 19
 
-# Фіксовані параметри фільтрів під W=15
+# Фіксовані параметри фільтрів під W=19
 EMA_ALPHA = 2 / (1 + WINDOW_SIZE_FALLBACK)
 MEDIAN_WINDOW = WINDOW_SIZE_FALLBACK
 
